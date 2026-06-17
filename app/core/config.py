@@ -41,6 +41,12 @@ class Settings(BaseSettings):
     # Auth token lifetimes (hours)
     MAGIC_LINK_EXPIRE_HOURS: int = 72
     INVITE_LINK_EXPIRE_HOURS: int = 7 * 24
+    PASSWORD_RESET_EXPIRE_HOURS: int = 24
+
+    # Credential rules
+    PASSWORD_MIN_LENGTH: int = 8
+    USERNAME_MIN_LENGTH: int = 3
+    USERNAME_MAX_LENGTH: int = 32
 
     # Security
     BCRYPT_ROUNDS: int = 12
