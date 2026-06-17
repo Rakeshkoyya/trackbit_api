@@ -59,3 +59,23 @@ def test_normalize_username_rejects_invalid(bad):
 
 def test_normalize_username_allows_dot_dash_underscore():
     assert normalize_username("a.b-c_d") == "a.b-c_d"
+
+
+# --------------------------------------------------------------------------
+# Password-reset tokens
+# --------------------------------------------------------------------------
+def test_password_reset_token_single_use(db_session, cleanup):
+    email = f"reset-{uuid.uuid4().hex[:8]}@example.com"
+    org, user = _make_user_in_org(db_session, email=email, password="oldpassword1")
+    cleanup["orgs"].append(org.id)
+    cleanup["users"].append(user.id)
+
+    svc = TokenService(db_session)
+    raw = svc.issue_password_reset(user.id)
+    db_session.flush()
+
+    u, o, m = svc.consume_reset_token(raw)
+    assert u.id == user.id and o.id == org.id and m.org_role == "member"
+
+    with pytest.raises(Exception):  # AuthError — already used
+        svc.consume_reset_token(raw)

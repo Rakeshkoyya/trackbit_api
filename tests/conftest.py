@@ -62,3 +62,17 @@ def cleanup():
         db.commit()
     finally:
         db.close()
+
+
+@pytest.fixture
+def db_session():
+    """A direct app-role session for service-level unit tests. These pass explicit
+    org/user ids; the `cleanup` fixture hard-deletes them afterwards."""
+    from app.core.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        yield db
+        db.commit()
+    finally:
+        db.close()

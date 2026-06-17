@@ -36,11 +36,6 @@ class TokenService:
         )
         return raw
 
-    def issue_magic_link(self, user_id) -> str:
-        return self._issue(
-            user_id=user_id, purpose="magic_link", ttl_hours=settings.MAGIC_LINK_EXPIRE_HOURS
-        )
-
     def issue_invite(self, *, user_id, org_id) -> str:
         return self._issue(
             user_id=user_id,
@@ -53,19 +48,59 @@ class TokenService:
         """The shareable URL the frontend resolves at /join/<token>."""
         return f"{settings.FRONTEND_BASE_URL}/join/{raw_token}"
 
+    def issue_password_reset(self, user_id) -> str:
+        return self._issue(
+            user_id=user_id,
+            purpose="password_reset",
+            ttl_hours=settings.PASSWORD_RESET_EXPIRE_HOURS,
+        )
+
+    def reset_url(self, raw_token: str) -> str:
+        """The shareable URL the frontend resolves at /reset/<token>."""
+        return f"{settings.FRONTEND_BASE_URL}/reset/{raw_token}"
+
+    def consume_reset_token(self, raw_token: str) -> tuple[User, Organization, Membership]:
+        """Validate + atomically consume a password_reset token; resolve session ctx."""
+        token_row = self.db.scalar(
+            select(AuthToken).where(
+                AuthToken.token_hash == hash_token(raw_token),
+                AuthToken.purpose == "password_reset",
+            )
+        )
+        if token_row is None:
+            raise AuthError("This link is invalid.", code="bad_link")
+        if token_row.expires_at <= _now():
+            raise AuthError("This link has expired. Ask for a new one.", code="expired_link")
+        consumed = self.db.execute(
+            update(AuthToken)
+            .where(AuthToken.id == token_row.id, AuthToken.used_at.is_(None))
+            .values(used_at=_now())
+        )
+        if consumed.rowcount == 0:
+            raise AuthError("This link has already been used.", code="used_link")
+        user = self.db.get(User, token_row.user_id)
+        membership = self.db.scalar(
+            select(Membership).where(
+                Membership.user_id == token_row.user_id, Membership.status == "active"
+            )
+        )
+        if user is None or membership is None:
+            raise AuthError("This account is no longer active.", code="revoked")
+        org = self.db.get(Organization, membership.org_id)
+        return user, org, membership
+
     def verify_and_consume(
         self, raw_token: str
     ) -> tuple[User, Organization, Membership, str]:
         """Validate, atomically consume, and resolve session context for a token.
 
-        Returns (user, org, membership, purpose). Works for both magic_link and
-        invite purposes. Raises AuthError on any invalid/expired/already-used
-        token (mapped to 401).
+        Returns (user, org, membership, purpose) for an invite token. Raises
+        AuthError on any invalid/expired/already-used token (mapped to 401).
         """
         token_row = self.db.scalar(
             select(AuthToken).where(
                 AuthToken.token_hash == hash_token(raw_token),
-                AuthToken.purpose.in_(("magic_link", "invite")),
+                AuthToken.purpose == "invite",
             )
         )
         if token_row is None:
