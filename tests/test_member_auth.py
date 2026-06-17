@@ -5,7 +5,7 @@ import uuid
 import pytest
 from sqlalchemy.orm import Session as OrmSession
 
-from app.core.exceptions import ValidationError
+from app.core.exceptions import AuthError, ValidationError
 from app.core.security import hash_password
 from app.core.validators import normalize_username
 from app.models import Membership, Organization, User
@@ -77,7 +77,7 @@ def test_password_reset_token_single_use(db_session, cleanup):
     u, o, m = svc.consume_reset_token(raw)
     assert u.id == user.id and o.id == org.id and m.org_role == "member"
 
-    with pytest.raises(Exception):  # AuthError — already used
+    with pytest.raises(AuthError):  # already used
         svc.consume_reset_token(raw)
 
 

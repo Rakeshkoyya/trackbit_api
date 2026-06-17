@@ -19,7 +19,7 @@ def _make_org(db, label: str) -> tuple[Organization, TaskInstance]:
     org = Organization(name=f"rls-{label}-{uuid.uuid4()}")
     db.add(org)
     db.flush()
-    owner = User(name="owner")
+    owner = User(name="owner", email=f"owner-{uuid.uuid4().hex[:8]}@example.com")
     db.add(owner)
     db.flush()
     board = Board(org_id=org.id, name="B", created_by=owner.id, owner_id=owner.id)

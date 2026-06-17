@@ -26,7 +26,7 @@ def world():
         created_orgs.append(org.id)
 
         def mk_user(name):
-            u = User(name=name)
+            u = User(name=name, email=f"vis-{uuid.uuid4().hex[:8]}@example.com")
             db.add(u)
             db.flush()
             created_users.append(u.id)

@@ -56,7 +56,7 @@ def _mk_org(db, tz="Asia/Kolkata"):
     org = Organization(name=f"rec-{uuid.uuid4()}", timezone=tz)
     db.add(org)
     db.flush()
-    u = User(name="owner")
+    u = User(name="owner", email=f"owner-{uuid.uuid4().hex[:8]}@example.com")
     db.add(u)
     db.flush()
     board = Board(org_id=org.id, name="B", created_by=u.id, owner_id=u.id)
