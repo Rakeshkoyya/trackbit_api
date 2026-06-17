@@ -171,13 +171,38 @@ class MemberService:
                phone: str | None, role: str, mode: str) -> dict:
         org_id = admin.org_id  # org from auth context, never from the request
 
-        # Resolve or create the (global) user by contact.
+        # Resolve the (global) user by contact. email is CITEXT, so this lookup is
+        # case-insensitive (Alice@x.com and alice@x.com are the same account).
         user = None
         if email:
             user = self.db.scalar(select(User).where(User.email == email))
         if user is None and phone:
             user = self.db.scalar(select(User).where(User.phone == phone))
-        if user is None:
+
+        # Their membership in *this* org, if any (drives reactivation vs. block).
+        existing = (
+            self.db.scalar(
+                select(Membership).where(
+                    Membership.org_id == org_id, Membership.user_id == user.id
+                )
+            )
+            if user is not None
+            else None
+        )
+
+        if user is not None:
+            if existing and existing.status == "active":
+                raise ConflictError("This person is already a member.", code="already_member")
+            if existing is None:
+                # The email/phone already belongs to an account that isn't part of
+                # this org. v2 is one-user-one-org, so don't silently attach a
+                # stranger's account — surface it instead of a quiet "invite sent".
+                raise ConflictError(
+                    "That email is already registered to another account.",
+                    code="email_in_use",
+                )
+            # existing && not active -> a former member of THIS org: reactivate below.
+        else:
             # Brand-new staffer: no password yet — they set it on first login.
             user = User(name=name, email=email, phone=phone, must_set_password=True)
             self.db.add(user)
@@ -185,13 +210,6 @@ class MemberService:
 
         # Membership is created active — open model, instant (PRD D2): the invite
         # link is a login, not an accept/reject gate.
-        existing = self.db.scalar(
-            select(Membership).where(
-                Membership.org_id == org_id, Membership.user_id == user.id
-            )
-        )
-        if existing and existing.status == "active":
-            raise ConflictError("This person is already a member.", code="already_member")
         # Free-seat cap applies to new + reactivated members (the core loop isn't
         # paywalled, but team size is).
         plans.enforce_member_quota(self.db, admin.org)
@@ -218,31 +236,55 @@ class MemberService:
             self.db, event=analytics.MEMBER_INVITED, org_id=org_id, user_id=user.id,
             props={"role": role, "mode": mode, "invited_by": str(admin.user_id)},
         )
-        return {"user_id": user.id, "name": user.name, "role": role, "invite_url": url}
+        return {
+            "user_id": user.id, "name": user.name, "role": role,
+            "invite_url": url, "pending": bool(user.must_set_password),
+        }
+
+    def check_username(self, raw: str) -> dict:
+        """Live availability check for the bulk-add grid (admin-only). Mirrors the
+        bulk-create rules: normalize → format check → global uniqueness."""
+        try:
+            uname = normalize_username(raw)
+        except ValidationError as exc:
+            return {
+                "username": (raw or "").strip().lower(),
+                "available": False,
+                "error": exc.code or "invalid_username",
+            }
+        taken = self.db.scalar(select(User.id).where(User.username == uname)) is not None
+        return {
+            "username": uname,
+            "available": not taken,
+            "error": "username_taken" if taken else None,
+        }
 
     def bulk_create(self, admin: CurrentMember, rows: list) -> BulkMembersResponse:
         """Best-effort create username+password staff accounts. Per-row results."""
         results: list[BulkMemberResult] = []
         created = 0
         for row in rows:
+            row_name = (row.name or "").strip()
             try:
                 uname = normalize_username(row.username)
             except ValidationError as exc:
                 results.append(BulkMemberResult(
-                    name=row.name, username=row.username, role=row.role,
+                    name=row_name or row.username, username=row.username, role=row.role,
                     ok=False, error=exc.code or "invalid_username"))
                 continue
             if self.db.scalar(select(User.id).where(User.username == uname)) is not None:
                 results.append(BulkMemberResult(
-                    name=row.name, username=uname, role=row.role, ok=False, error="username_taken"))
+                    name=row_name or uname, username=uname, role=row.role, ok=False, error="username_taken"))
                 continue
             try:
                 plans.enforce_member_quota(self.db, admin.org)
             except PlanLimitError:
                 results.append(BulkMemberResult(
-                    name=row.name, username=uname, role=row.role, ok=False, error="plan_limit"))
+                    name=row_name or uname, username=uname, role=row.role, ok=False, error="plan_limit"))
                 continue
-            user = User(name=row.name.strip(), username=uname,
+            # No name given -> start with the username as the display name; the
+            # staffer replaces it on first login (set-password screen).
+            user = User(name=row_name or uname, username=uname,
                         password_hash=hash_password(row.password), must_set_password=True)
             self.db.add(user)
             self.db.flush()

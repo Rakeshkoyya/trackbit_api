@@ -166,6 +166,60 @@ def test_set_password_clears_flag(client, cleanup):
     assert me.json()["must_set_password"] is False
 
 
+def test_update_profile_name(client, unique_email, cleanup):
+    reg = _register_admin(client, unique_email, cleanup)
+    h = {"Authorization": f"Bearer {reg['access_token']}"}
+    r = client.patch("/api/v1/auth/me", headers=h, json={"name": "Renamed Admin"})
+    assert r.status_code == 200, r.text
+    assert r.json()["user"]["name"] == "Renamed Admin"
+    assert client.get("/api/v1/auth/me", headers=h).json()["user"]["name"] == "Renamed Admin"
+
+
+def test_change_password_flow(client, unique_email, cleanup):
+    reg = _register_admin(client, unique_email, cleanup)
+    h = {"Authorization": f"Bearer {reg['access_token']}"}
+
+    bad = client.post("/api/v1/auth/change-password", headers=h,
+                      json={"current_password": "wrongpass1", "new_password": "brandnew123"})
+    assert bad.status_code == 401 and bad.json()["error"]["code"] == "bad_password"
+
+    ok = client.post("/api/v1/auth/change-password", headers=h,
+                     json={"current_password": "ownerpass1", "new_password": "brandnew123"})
+    assert ok.status_code == 200, ok.text
+
+    # Old password is dead, new one works.
+    assert client.post("/api/v1/auth/login",
+                       json={"identifier": unique_email, "password": "ownerpass1"}).status_code == 401
+    assert client.post("/api/v1/auth/login",
+                       json={"identifier": unique_email, "password": "brandnew123"}).status_code == 200
+
+
+def test_set_password_can_set_name(client, cleanup):
+    """First login lets username staff replace the placeholder name."""
+    from app.core.database import SessionLocal
+
+    uname = f"setname{uuid.uuid4().hex[:6]}"
+    db = SessionLocal()
+    try:
+        org, user = _make_user_in_org(db, username=uname, password="temppass1")
+        user.must_set_password = True
+        user.name = uname  # placeholder, as nameless bulk-create leaves it
+        db.commit()
+        cleanup["orgs"].append(org.id)
+        cleanup["users"].append(user.id)
+    finally:
+        db.close()
+
+    token = client.post("/api/v1/auth/login",
+                        json={"identifier": uname, "password": "temppass1"}).json()["access_token"]
+    sp = client.post("/api/v1/auth/set-password", headers={"Authorization": f"Bearer {token}"},
+                     json={"password": "myownpass1", "name": "Ravi Kumar"})
+    assert sp.status_code == 200, sp.text
+    me = client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert me.json()["user"]["name"] == "Ravi Kumar"
+    assert me.json()["must_set_password"] is False
+
+
 # --------------------------------------------------------------------------
 # Member service: bulk create, pending, admin reset
 # --------------------------------------------------------------------------
@@ -185,6 +239,42 @@ def test_bulk_create_members(client, unique_email, cleanup):
 
     sess = client.post("/api/v1/auth/login", json={"identifier": f"ravi{suffix}", "password": "temppass1"})
     assert sess.status_code == 200 and sess.json()["must_set_password"] is True
+
+
+def test_bulk_create_without_name_defaults_to_username(client, unique_email, cleanup):
+    h = _admin_headers(client, unique_email, cleanup)
+    uname = f"noname{uuid.uuid4().hex[:6]}"
+    resp = client.post("/api/v1/org/members/bulk", headers=h,
+                       json={"members": [{"username": uname, "password": "temppass1"}]})  # no name
+    assert resp.status_code == 200, resp.text
+    row = resp.json()["results"][0]
+    assert row["ok"]
+    cleanup["users"].append(uuid.UUID(row["user_id"]))
+    # Until they set their own on first login, the display name is the username.
+    members = client.get("/api/v1/org/members", headers=h).json()["members"]
+    created = next(m for m in members if m["username"] == uname)
+    assert created["name"] == uname
+
+
+def test_username_availability_check(client, unique_email, cleanup):
+    h = _admin_headers(client, unique_email, cleanup)
+    taken = f"taken{uuid.uuid4().hex[:6]}"
+    bulk = client.post("/api/v1/org/members/bulk", headers=h,
+                       json={"members": [{"username": taken, "password": "temppass1"}]})
+    cleanup["users"].append(uuid.UUID(bulk.json()["results"][0]["user_id"]))
+
+    taken_resp = client.get(f"/api/v1/org/members/username-available?username={taken}", headers=h)
+    assert taken_resp.status_code == 200, taken_resp.text
+    assert taken_resp.json()["available"] is False
+    assert taken_resp.json()["error"] == "username_taken"
+
+    free_resp = client.get(
+        f"/api/v1/org/members/username-available?username=free{uuid.uuid4().hex[:6]}", headers=h)
+    assert free_resp.status_code == 200 and free_resp.json()["available"] is True
+
+    bad_resp = client.get("/api/v1/org/members/username-available?username=ab", headers=h)  # too short
+    assert bad_resp.status_code == 200 and bad_resp.json()["available"] is False
+    assert bad_resp.json()["error"] == "invalid_username"
 
 
 def test_bulk_create_best_effort_on_dup(client, unique_email, cleanup):
@@ -215,6 +305,36 @@ def test_invite_email_user_is_pending(client, unique_email, cleanup):
     members = client.get("/api/v1/org/members", headers=h).json()["members"]
     row = next(m for m in members if m["email"] == invitee)
     assert row["pending"] is True
+
+
+def test_invite_brand_new_returns_link_and_pending(client, unique_email, cleanup):
+    h = _admin_headers(client, unique_email, cleanup)
+    invitee = f"fresh-{uuid.uuid4().hex[:8]}@example.com"
+    resp = client.post("/api/v1/org/members/invite", headers=h,
+                       json={"name": "Fresh", "email": invitee, "role": "member"})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    cleanup["users"].append(uuid.UUID(body["user_id"]))
+    assert "/join/" in body["invite_url"]   # a shareable link, not just "sent"
+    assert body["pending"] is True
+
+    # Re-inviting the same active member is a clear conflict, not a silent re-add.
+    dup = client.post("/api/v1/org/members/invite", headers=h,
+                      json={"name": "Fresh", "email": invitee, "role": "member"})
+    assert dup.status_code == 409 and dup.json()["error"]["code"] == "already_member"
+
+
+def test_invite_email_registered_to_another_org_is_blocked(client, unique_email, cleanup):
+    # An email that already belongs to a user in a *different* org (here, that org's
+    # founder) must not be silently pulled into this org — v2 is one-user-one-org.
+    other_email = f"owner-{uuid.uuid4().hex[:8]}@example.com"
+    _register_admin(client, other_email, cleanup)  # org A + user(other_email)
+
+    h = _admin_headers(client, unique_email, cleanup)  # org B admin
+    resp = client.post("/api/v1/org/members/invite", headers=h,
+                       json={"name": "Taken", "email": other_email, "role": "member"})
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["error"]["code"] == "email_in_use"
 
 
 def test_admin_reset_username_user(client, unique_email, cleanup):

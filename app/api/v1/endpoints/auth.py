@@ -9,6 +9,7 @@ from app.core.dependencies import get_current_member
 from app.core.rate_limit import limiter
 from app.models import User
 from app.schemas.auth import (
+    ChangePasswordRequest,
     ForgotPasswordRequest,
     LoginRequest,
     MeResponse,
@@ -17,6 +18,7 @@ from app.schemas.auth import (
     ResetPasswordRequest,
     SessionResponse,
     SetPasswordRequest,
+    UpdateProfileRequest,
     VerifyTokenRequest,
 )
 from app.schemas.common import MessageResponse
@@ -59,7 +61,7 @@ def set_password(
     member=Depends(get_current_member),
     db: Session = Depends(get_db),
 ) -> MessageResponse:
-    AuthService(db).set_password(member.user, body.password)
+    AuthService(db).set_password(member.user, body.password, name=body.name)
     analytics.track(db, event=analytics.PASSWORD_SET, org_id=member.org_id, user_id=member.user_id)
     return MessageResponse(message="Password set.")
 
@@ -106,3 +108,31 @@ def me(member=Depends(get_current_member)) -> MeResponse:
         org_role=member.org_role, must_set_password=member.user.must_set_password,
         user=member.user, org=member.org,
     )
+
+
+@router.patch("/me", response_model=MeResponse)
+def update_me(
+    body: UpdateProfileRequest,
+    member=Depends(get_current_member),
+    db: Session = Depends(get_db),
+) -> MeResponse:
+    AuthService(db).update_profile(member.user, name=body.name)
+    return MeResponse(
+        org_role=member.org_role, must_set_password=member.user.must_set_password,
+        user=member.user, org=member.org,
+    )
+
+
+@router.post("/change-password", response_model=MessageResponse)
+@limiter.limit("10/minute")
+def change_password(
+    request: Request,
+    body: ChangePasswordRequest,
+    member=Depends(get_current_member),
+    db: Session = Depends(get_db),
+) -> MessageResponse:
+    AuthService(db).change_password(
+        member.user, current_password=body.current_password, new_password=body.new_password,
+    )
+    analytics.track(db, event=analytics.PASSWORD_SET, org_id=member.org_id, user_id=member.user_id)
+    return MessageResponse(message="Password changed.")

@@ -24,6 +24,18 @@ class RefreshRequest(BaseModel):
 
 class SetPasswordRequest(BaseModel):
     password: str = Field(min_length=8, max_length=128)
+    # Optional: first-login name capture (bulk/username staff start with a
+    # placeholder name = their username and can set a real one here).
+    name: str | None = Field(default=None, max_length=120)
+
+
+class UpdateProfileRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)
 
 
 class ForgotPasswordRequest(BaseModel):

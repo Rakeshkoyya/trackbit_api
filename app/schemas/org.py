@@ -29,6 +29,7 @@ class InvitedMemberResponse(BaseModel):
     name: str
     role: str
     invite_url: str
+    pending: bool = False  # brand-new account that still needs to set a password
 
 
 class MemberOut(BaseModel):
@@ -58,7 +59,9 @@ class RemoveMemberResponse(BaseModel):
 
 
 class BulkMemberRow(BaseModel):
-    name: str = Field(min_length=1, max_length=120)
+    # Name is optional: staff set their own on first login. When omitted, the
+    # account's display name defaults to the username until then.
+    name: str | None = Field(default=None, max_length=120)
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=8, max_length=128)
     role: str = Field(default="member", pattern="^(admin|member)$")
@@ -81,6 +84,12 @@ class BulkMemberResult(BaseModel):
 class BulkMembersResponse(BaseModel):
     results: list[BulkMemberResult]
     created: int
+
+
+class UsernameAvailabilityResponse(BaseModel):
+    username: str  # normalized form (lowercased/trimmed) the server would store
+    available: bool
+    error: str | None = None  # "username_taken" | "invalid_username" when not available
 
 
 class AdminResetPasswordRequest(BaseModel):

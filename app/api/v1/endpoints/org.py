@@ -22,6 +22,7 @@ from app.schemas.org import (
     OrgSettingsUpdate,
     RemoveMemberResponse,
     RoleUpdateRequest,
+    UsernameAvailabilityResponse,
 )
 from app.schemas.report import NudgeResponse, OrgDashboardResponse
 from app.services.member import MemberService
@@ -72,6 +73,17 @@ def list_members(
 ) -> MembersListResponse:
     # Any member can see the roster (open model); only admins mutate it.
     return MemberService(db).list_members(member)
+
+
+@router.get("/members/username-available", response_model=UsernameAvailabilityResponse)
+def username_available(
+    username: str = Query(..., min_length=1, max_length=64),
+    admin: CurrentMember = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> UsernameAvailabilityResponse:
+    # Static path declared before the dynamic /members/{user_id} routes so it
+    # isn't shadowed. Admin-only: it powers the bulk-add grid's live check.
+    return UsernameAvailabilityResponse(**MemberService(db).check_username(username))
 
 
 @router.post("/members/invite", response_model=InvitedMemberResponse)

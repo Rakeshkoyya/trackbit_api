@@ -121,10 +121,30 @@ class AuthService:
         membership.last_active_at = _now()
         return self._build_session(user, org, membership)
 
-    def set_password(self, user: User, new_password: str) -> None:
-        """Set a user's password and clear the must-set flag (first login / forced change)."""
+    def update_profile(self, user: User, *, name: str) -> None:
+        """Update the signed-in user's display name. Name isn't in the JWT, so no
+        re-auth is needed — /me returns the new value immediately."""
+        user.name = name.strip()
+        self.db.flush()
+
+    def change_password(self, user: User, *, current_password: str, new_password: str) -> None:
+        """Self-service password change: verify the current password first."""
+        if not user.password_hash or not verify_password(current_password, user.password_hash):
+            raise AuthError("Current password is incorrect.", code="bad_password")
         user.password_hash = hash_password(new_password)
         user.must_set_password = False
+        self.db.flush()
+
+    def set_password(self, user: User, new_password: str, *, name: str | None = None) -> None:
+        """Set a user's password and clear the must-set flag (first login / forced change).
+
+        Optionally set the display name too — bulk/username staff finish onboarding
+        by choosing their real name here (they start with a username placeholder).
+        """
+        user.password_hash = hash_password(new_password)
+        user.must_set_password = False
+        if name and name.strip():
+            user.name = name.strip()
         self.db.flush()
 
     def refresh(self, *, raw_refresh: str) -> dict:
