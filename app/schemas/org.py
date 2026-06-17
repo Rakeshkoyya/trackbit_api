@@ -35,12 +35,14 @@ class MemberOut(BaseModel):
     user_id: uuid.UUID
     name: str
     email: str | None = None
+    username: str | None = None
     phone: str | None = None
     role: str
     status: str
     last_active_at: datetime | None = None
     has_email: bool = False
     has_phone: bool = False
+    pending: bool = False  # invited/created but hasn't set their own password yet
 
 
 class MembersListResponse(BaseModel):
@@ -53,6 +55,43 @@ class RoleUpdateRequest(BaseModel):
 
 class RemoveMemberResponse(BaseModel):
     orphaned_tasks: int = 0
+
+
+class BulkMemberRow(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=8, max_length=128)
+    role: str = Field(default="member", pattern="^(admin|member)$")
+
+
+class BulkMembersRequest(BaseModel):
+    members: list[BulkMemberRow] = Field(min_length=1, max_length=100)
+
+
+class BulkMemberResult(BaseModel):
+    name: str
+    username: str
+    role: str
+    ok: bool
+    user_id: uuid.UUID | None = None
+    password: str | None = None  # echoed back for the copyable summary on success
+    error: str | None = None  # code on failure (username_taken / invalid_username / plan_limit)
+
+
+class BulkMembersResponse(BaseModel):
+    results: list[BulkMemberResult]
+    created: int
+
+
+class AdminResetPasswordRequest(BaseModel):
+    # Present => username user: set this as the new temp password (forces change).
+    # Absent  => email user: send a reset link.
+    password: str | None = Field(default=None, min_length=8, max_length=128)
+
+
+class AdminResetPasswordResponse(BaseModel):
+    mode: str  # "link_sent" | "password_set"
+    password: str | None = None  # echoed temp password when mode == password_set
 
 
 # ---- org settings + usage (S9) ----------------------------------------

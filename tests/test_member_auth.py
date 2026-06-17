@@ -164,3 +164,67 @@ def test_set_password_clears_flag(client, cleanup):
     assert sp.status_code == 200, sp.text
     me = client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
     assert me.json()["must_set_password"] is False
+
+
+# --------------------------------------------------------------------------
+# Member service: bulk create, pending, admin reset
+# --------------------------------------------------------------------------
+def test_bulk_create_members(client, unique_email, cleanup):
+    h = _admin_headers(client, unique_email, cleanup)
+    suffix = uuid.uuid4().hex[:6]
+    resp = client.post("/api/v1/org/members/bulk", headers=h, json={"members": [
+        {"name": "Ravi", "username": f"ravi{suffix}", "password": "temppass1", "role": "member"},
+        {"name": "Sita", "username": f"sita{suffix}", "password": "temppass2", "role": "admin"},
+    ]})
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["created"] == 2
+    for r in data["results"]:
+        assert r["ok"] and r["password"] is not None
+        cleanup["users"].append(uuid.UUID(r["user_id"]))
+
+    sess = client.post("/api/v1/auth/login", json={"identifier": f"ravi{suffix}", "password": "temppass1"})
+    assert sess.status_code == 200 and sess.json()["must_set_password"] is True
+
+
+def test_bulk_create_best_effort_on_dup(client, unique_email, cleanup):
+    h = _admin_headers(client, unique_email, cleanup)
+    suffix = uuid.uuid4().hex[:6]
+    first = client.post("/api/v1/org/members/bulk", headers=h, json={"members": [
+        {"name": "Ravi", "username": f"dup{suffix}", "password": "temppass1"}]})
+    cleanup["users"].append(uuid.UUID(first.json()["results"][0]["user_id"]))
+
+    resp = client.post("/api/v1/org/members/bulk", headers=h, json={"members": [
+        {"name": "Ravi2", "username": f"dup{suffix}", "password": "temppass1"},      # taken
+        {"name": "New", "username": f"fresh{suffix}", "password": "temppass1"},      # ok
+    ]})
+    data = resp.json()
+    assert data["created"] == 1
+    assert data["results"][0]["ok"] is False and data["results"][0]["error"] == "username_taken"
+    assert data["results"][1]["ok"] is True
+    cleanup["users"].append(uuid.UUID(data["results"][1]["user_id"]))
+
+
+def test_invite_email_user_is_pending(client, unique_email, cleanup):
+    h = _admin_headers(client, unique_email, cleanup)
+    invitee = f"invitee-{uuid.uuid4().hex[:8]}@example.com"
+    inv = client.post("/api/v1/org/members/invite", headers=h,
+                      json={"name": "Newbie", "email": invitee, "role": "member", "mode": "email_invite"})
+    assert inv.status_code == 200, inv.text
+    cleanup["users"].append(uuid.UUID(inv.json()["user_id"]))
+    members = client.get("/api/v1/org/members", headers=h).json()["members"]
+    row = next(m for m in members if m["email"] == invitee)
+    assert row["pending"] is True
+
+
+def test_admin_reset_username_user(client, unique_email, cleanup):
+    h = _admin_headers(client, unique_email, cleanup)
+    suffix = uuid.uuid4().hex[:6]
+    bulk = client.post("/api/v1/org/members/bulk", headers=h, json={"members": [
+        {"name": "Ravi", "username": f"reset{suffix}", "password": "temppass1"}]})
+    uid = bulk.json()["results"][0]["user_id"]
+    cleanup["users"].append(uuid.UUID(uid))
+    r = client.post(f"/api/v1/org/members/{uid}/reset-password", headers=h, json={"password": "newtemp99"})
+    assert r.status_code == 200 and r.json()["mode"] == "password_set"
+    assert client.post("/api/v1/auth/login",
+                       json={"identifier": f"reset{suffix}", "password": "newtemp99"}).status_code == 200

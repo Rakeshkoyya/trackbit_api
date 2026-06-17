@@ -12,9 +12,17 @@ from sqlalchemy.orm import Session
 
 from app.core import plans
 from app.core.context import CurrentMember
-from app.core.exceptions import ConflictError, NotFoundError, ValidationError
+from app.core.exceptions import ConflictError, NotFoundError, PlanLimitError, ValidationError
+from app.core.security import hash_password
+from app.core.validators import normalize_username
 from app.models import Board, BoardMember, Membership, TaskInstance, User
-from app.schemas.org import MemberOut, MembersListResponse
+from app.schemas.org import (
+    AdminResetPasswordResponse,
+    BulkMemberResult,
+    BulkMembersResponse,
+    MemberOut,
+    MembersListResponse,
+)
 from app.services import analytics, events
 from app.services.delivery import send_email
 from app.services.tokens import TokenService
@@ -34,9 +42,10 @@ class MemberService:
         return MembersListResponse(
             members=[
                 MemberOut(
-                    user_id=u.id, name=u.name, email=u.email, phone=u.phone,
+                    user_id=u.id, name=u.name, email=u.email, username=u.username, phone=u.phone,
                     role=m.org_role, status=m.status, last_active_at=m.last_active_at,
                     has_email=u.email is not None, has_phone=u.phone is not None,
+                    pending=bool(u.must_set_password and m.last_active_at is None),
                 )
                 for m, u in rows
             ]
@@ -76,9 +85,10 @@ class MemberService:
             self.db.flush()
         user = self.db.get(User, user_id)
         return MemberOut(
-            user_id=user.id, name=user.name, email=user.email, phone=user.phone,
-            role=m.org_role, status=m.status, last_active_at=m.last_active_at,
+            user_id=user.id, name=user.name, email=user.email, username=user.username,
+            phone=user.phone, role=m.org_role, status=m.status, last_active_at=m.last_active_at,
             has_email=user.email is not None, has_phone=user.phone is not None,
+            pending=bool(user.must_set_password and m.last_active_at is None),
         )
 
     def _oldest_admin(self, org_id: uuid.UUID, exclude: uuid.UUID) -> uuid.UUID | None:
@@ -168,7 +178,8 @@ class MemberService:
         if user is None and phone:
             user = self.db.scalar(select(User).where(User.phone == phone))
         if user is None:
-            user = User(name=name, email=email, phone=phone)  # passwordless staffer
+            # Brand-new staffer: no password yet — they set it on first login.
+            user = User(name=name, email=email, phone=phone, must_set_password=True)
             self.db.add(user)
             self.db.flush()
 
@@ -208,3 +219,61 @@ class MemberService:
             props={"role": role, "mode": mode, "invited_by": str(admin.user_id)},
         )
         return {"user_id": user.id, "name": user.name, "role": role, "invite_url": url}
+
+    def bulk_create(self, admin: CurrentMember, rows: list) -> BulkMembersResponse:
+        """Best-effort create username+password staff accounts. Per-row results."""
+        results: list[BulkMemberResult] = []
+        created = 0
+        for row in rows:
+            try:
+                uname = normalize_username(row.username)
+            except ValidationError as exc:
+                results.append(BulkMemberResult(
+                    name=row.name, username=row.username, role=row.role,
+                    ok=False, error=exc.code or "invalid_username"))
+                continue
+            if self.db.scalar(select(User.id).where(User.username == uname)) is not None:
+                results.append(BulkMemberResult(
+                    name=row.name, username=uname, role=row.role, ok=False, error="username_taken"))
+                continue
+            try:
+                plans.enforce_member_quota(self.db, admin.org)
+            except PlanLimitError:
+                results.append(BulkMemberResult(
+                    name=row.name, username=uname, role=row.role, ok=False, error="plan_limit"))
+                continue
+            user = User(name=row.name.strip(), username=uname,
+                        password_hash=hash_password(row.password), must_set_password=True)
+            self.db.add(user)
+            self.db.flush()
+            self.db.add(Membership(org_id=admin.org_id, user_id=user.id,
+                                   org_role=row.role, status="active"))
+            self.db.flush()
+            created += 1
+            results.append(BulkMemberResult(
+                name=user.name, username=uname, role=row.role, ok=True,
+                user_id=user.id, password=row.password))
+        analytics.track(self.db, event=analytics.MEMBER_BULK_CREATED, org_id=admin.org_id,
+                        user_id=admin.user_id, props={"created": created})
+        return BulkMembersResponse(results=results, created=created)
+
+    def admin_reset_password(
+        self, admin: CurrentMember, user_id: uuid.UUID, new_password: str | None
+    ) -> AdminResetPasswordResponse:
+        m = self._get_membership(admin.org_id, user_id)
+        if m.status != "active":
+            raise ValidationError("That member isn't active.")
+        user = self.db.get(User, user_id)
+        if new_password is not None:
+            # Username/no-email user: set a temp password, force change on next login.
+            user.password_hash = hash_password(new_password)
+            user.must_set_password = True
+            self.db.flush()
+            return AdminResetPasswordResponse(mode="password_set", password=new_password)
+        if not user.email:
+            raise ValidationError(
+                "This member has no email — set a new password instead.", code="no_email")
+        raw = TokenService(self.db).issue_password_reset(user.id)
+        send_email(to=user.email, subject="Reset your TrackBit password",
+                   body=f"Tap to choose a new password:\n{TokenService(self.db).reset_url(raw)}")
+        return AdminResetPasswordResponse(mode="link_sent")

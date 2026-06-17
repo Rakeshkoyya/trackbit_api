@@ -10,6 +10,10 @@ from app.core.database import get_db
 from app.core.dependencies import get_current_member, require_admin
 from app.core.rate_limit import limiter
 from app.schemas.org import (
+    AdminResetPasswordRequest,
+    AdminResetPasswordResponse,
+    BulkMembersRequest,
+    BulkMembersResponse,
     InvitedMemberResponse,
     InviteMemberRequest,
     MemberOut,
@@ -103,3 +107,24 @@ def remove_member(
 ) -> RemoveMemberResponse:
     orphaned = MemberService(db).remove(admin, user_id)
     return RemoveMemberResponse(orphaned_tasks=orphaned)
+
+
+@router.post("/members/bulk", response_model=BulkMembersResponse)
+@limiter.limit("10/minute")
+def bulk_create_members(
+    request: Request,
+    body: BulkMembersRequest,
+    admin: CurrentMember = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> BulkMembersResponse:
+    return MemberService(db).bulk_create(admin, body.members)
+
+
+@router.post("/members/{user_id}/reset-password", response_model=AdminResetPasswordResponse)
+def admin_reset_password(
+    user_id: uuid.UUID,
+    body: AdminResetPasswordRequest,
+    admin: CurrentMember = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> AdminResetPasswordResponse:
+    return MemberService(db).admin_reset_password(admin, user_id, body.password)
