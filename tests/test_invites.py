@@ -58,7 +58,7 @@ def test_verify_rejects_garbage_token(client):
 
 def test_magic_link_request_never_leaks(client):
     # Unregistered email still returns 200 (no account enumeration).
-    resp = client.post("/api/v1/auth/magic-link/request",
+    resp = client.post("/api/v1/auth/forgot-password",
                        json={"email": "nobody-xyz@example.com"})
     assert resp.status_code == 200
 
@@ -69,7 +69,7 @@ def test_rate_limit_returns_429(client):
     limiter.reset()
     try:
         statuses = [
-            client.post("/api/v1/auth/magic-link/request",
+            client.post("/api/v1/auth/forgot-password",
                         json={"email": "nobody-xyz@example.com"}).status_code
             for _ in range(6)
         ]

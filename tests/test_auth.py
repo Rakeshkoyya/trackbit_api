@@ -35,7 +35,7 @@ def test_register_login_me_roundtrip(client, unique_email, cleanup):
 
     # login returns a fresh session for the same user.
     login = client.post(
-        "/api/v1/auth/login", json={"email": unique_email, "password": "supersecret1"}
+        "/api/v1/auth/login", json={"identifier": unique_email, "password": "supersecret1"}
     )
     assert login.status_code == 200, login.text
     assert login.json()["user"]["id"] == reg["user"]["id"]
@@ -47,7 +47,7 @@ def test_me_requires_auth(client):
 
 def test_login_rejects_bad_password(client, unique_email, cleanup):
     _register(client, unique_email, cleanup)
-    bad = client.post("/api/v1/auth/login", json={"email": unique_email, "password": "wrongwrong1"})
+    bad = client.post("/api/v1/auth/login", json={"identifier": unique_email, "password": "wrongwrong1"})
     assert bad.status_code == 401
 
 

@@ -58,6 +58,7 @@ class AuthService:
             "refresh_token": refresh,
             "token_type": "bearer",
             "org_role": membership.org_role,
+            "must_set_password": user.must_set_password,
             "user": user,
             "org": org,
         }
@@ -99,10 +100,14 @@ class AuthService:
         analytics.track(self.db, event=analytics.ORG_REGISTERED, org_id=org.id, user_id=user.id)
         return self._build_session(user, org, membership)
 
-    def login(self, *, email: str, password: str) -> dict:
-        user = self.db.scalar(select(User).where(User.email == email))
+    def login(self, *, identifier: str, password: str) -> dict:
+        ident = (identifier or "").strip()
+        if "@" in ident:
+            user = self.db.scalar(select(User).where(User.email == ident))
+        else:
+            user = self.db.scalar(select(User).where(User.username == ident.lower()))
         if user is None or not user.password_hash or not verify_password(password, user.password_hash):
-            raise AuthError("Incorrect email or password.", code="bad_credentials")
+            raise AuthError("Incorrect email/username or password.", code="bad_credentials")
 
         membership = self.db.scalar(
             select(Membership).where(
@@ -115,6 +120,12 @@ class AuthService:
         org = self.db.get(Organization, membership.org_id)
         membership.last_active_at = _now()
         return self._build_session(user, org, membership)
+
+    def set_password(self, user: User, new_password: str) -> None:
+        """Set a user's password and clear the must-set flag (first login / forced change)."""
+        user.password_hash = hash_password(new_password)
+        user.must_set_password = False
+        self.db.flush()
 
     def refresh(self, *, raw_refresh: str) -> dict:
         """Rotate the refresh token: consume the presented one, issue a fresh pair."""

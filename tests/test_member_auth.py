@@ -79,3 +79,88 @@ def test_password_reset_token_single_use(db_session, cleanup):
 
     with pytest.raises(Exception):  # AuthError — already used
         svc.consume_reset_token(raw)
+
+
+# --------------------------------------------------------------------------
+# Login by identifier (email or username)
+# --------------------------------------------------------------------------
+def test_login_by_username(client, cleanup):
+    from app.core.database import SessionLocal
+
+    uname = f"ravi{uuid.uuid4().hex[:6]}"
+    db = SessionLocal()
+    try:
+        org, user = _make_user_in_org(db, username=uname, password="staffpass1")
+        db.commit()
+        cleanup["orgs"].append(org.id)
+        cleanup["users"].append(user.id)
+    finally:
+        db.close()
+
+    resp = client.post("/api/v1/auth/login", json={"identifier": uname, "password": "staffpass1"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["user"]["username"] == uname
+
+
+def test_login_by_email_still_works(client, unique_email, cleanup):
+    _register_admin(client, unique_email, cleanup)
+    resp = client.post("/api/v1/auth/login", json={"identifier": unique_email, "password": "ownerpass1"})
+    assert resp.status_code == 200, resp.text
+
+
+def test_login_bad_credentials_generic(client):
+    resp = client.post("/api/v1/auth/login", json={"identifier": "nope.nobody", "password": "whatever1"})
+    assert resp.status_code == 401
+    assert resp.json()["error"]["code"] == "bad_credentials"
+
+
+# --------------------------------------------------------------------------
+# set / forgot / reset password
+# --------------------------------------------------------------------------
+def test_forgot_password_never_leaks(client):
+    resp = client.post("/api/v1/auth/forgot-password", json={"email": "ghost-xyz@example.com"})
+    assert resp.status_code == 200
+
+
+def test_reset_password_round_trip(client, unique_email, cleanup):
+    reg = _register_admin(client, unique_email, cleanup)
+    uid = uuid.UUID(reg["user"]["id"])
+
+    from app.core.database import SessionLocal
+    db = SessionLocal()
+    try:
+        raw = TokenService(db).issue_password_reset(uid)
+        db.commit()
+    finally:
+        db.close()
+
+    resp = client.post("/api/v1/auth/reset-password", json={"token": raw, "password": "brandnew99"})
+    assert resp.status_code == 200, resp.text
+    assert client.post("/api/v1/auth/login",
+                       json={"identifier": unique_email, "password": "brandnew99"}).status_code == 200
+    assert client.post("/api/v1/auth/login",
+                       json={"identifier": unique_email, "password": "ownerpass1"}).status_code == 401
+
+
+def test_set_password_clears_flag(client, cleanup):
+    from app.core.database import SessionLocal
+
+    uname = f"needspw{uuid.uuid4().hex[:6]}"
+    db = SessionLocal()
+    try:
+        org, user = _make_user_in_org(db, username=uname, password="temppass1")
+        user.must_set_password = True
+        db.commit()
+        cleanup["orgs"].append(org.id)
+        cleanup["users"].append(user.id)
+    finally:
+        db.close()
+
+    sess = client.post("/api/v1/auth/login", json={"identifier": uname, "password": "temppass1"})
+    assert sess.json()["must_set_password"] is True
+    token = sess.json()["access_token"]
+    sp = client.post("/api/v1/auth/set-password", headers={"Authorization": f"Bearer {token}"},
+                     json={"password": "myownpass1"})
+    assert sp.status_code == 200, sp.text
+    me = client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert me.json()["must_set_password"] is False

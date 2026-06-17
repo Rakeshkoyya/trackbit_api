@@ -14,7 +14,7 @@ class RegisterOrgRequest(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    email: EmailStr
+    identifier: str = Field(min_length=1, max_length=320)  # email or username
     password: str
 
 
@@ -22,8 +22,17 @@ class RefreshRequest(BaseModel):
     refresh_token: str
 
 
-class MagicLinkRequest(BaseModel):
+class SetPasswordRequest(BaseModel):
+    password: str = Field(min_length=8, max_length=128)
+
+
+class ForgotPasswordRequest(BaseModel):
     email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    password: str = Field(min_length=8, max_length=128)
 
 
 class VerifyTokenRequest(BaseModel):
@@ -35,6 +44,7 @@ class UserOut(BaseModel):
     id: uuid.UUID
     name: str
     email: str | None = None
+    username: str | None = None
     phone: str | None = None
 
 
@@ -51,11 +61,13 @@ class SessionResponse(BaseModel):
     refresh_token: str
     token_type: str = "bearer"
     org_role: str
+    must_set_password: bool = False
     user: UserOut
     org: OrgOut
 
 
 class MeResponse(BaseModel):
     org_role: str
+    must_set_password: bool = False
     user: UserOut
     org: OrgOut
