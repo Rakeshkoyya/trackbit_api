@@ -1,0 +1,38 @@
+# Keep the build context small and never ship secrets or local cruft.
+
+# Python / virtualenv
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+
+# Secrets & local env (config is injected at runtime by the platform)
+.env
+.env.*
+!.env.example
+
+# Local-disk attachment storage (dev/stub mode only)
+media/
+
+# VCS & editor
+.git/
+.gitignore
+.idea/
+.vscode/
+
+# Tests & docs aren't needed in the runtime image
+tests/
+
+# Docker / compose (not needed inside the image)
+Dockerfile
+.dockerignore
+docker-compose.yml
