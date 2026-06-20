@@ -14,10 +14,17 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models import DeviceToken, Notification, TaskInstance, User
+from app.services import email_templates
 from app.services import push as push_adapter
 from app.services.delivery import send_email
 
 logger = logging.getLogger("trackbit.dispatch")
+
+# Notification types allowed to fall back to email. Everything else is
+# push-only (Chrome pop-up) — reminders / assigned / passed / unassigned / nudge
+# must NOT land in anyone's inbox (product call). Push is still attempted for
+# ALL types below; this gate only controls the email fallback.
+EMAIL_ENABLED_TYPES = {"overdue", "digest", "report_card"}
 
 
 def _render(db: Session, n: Notification) -> tuple[str, str, str]:
@@ -77,9 +84,22 @@ def deliver(db: Session, n: Notification) -> bool:
             _mark_sent(n, "push")
             return True
 
-    # Email fallback.
-    if user.email:
-        if send_email(to=user.email, subject=title, body=f"{body}\n\n{url}"):
+    # Email fallback — only for the report-style types (overdue / digest /
+    # report_card). reminders, assigned, passed, unassigned and nudge are
+    # push-only and never email. Push above already covered the Chrome pop-up
+    # for every type.
+    if n.notif_type in EMAIL_ENABLED_TYPES and user.email:
+        # overdue is a task reminder → reminders@; digest/report_card are general
+        # updates → the default hello@ sender.
+        sender = (
+            settings.RESEND_FROM_REMINDERS
+            if n.notif_type == "overdue"
+            else settings.RESEND_FROM
+        )
+        html, text = email_templates.notification(
+            notif_type=n.notif_type, heading=title, message=body, url=url
+        )
+        if send_email(to=user.email, subject=title, body=text, html=html, sender=sender):
             _mark_sent(n, "email")
             return True
 

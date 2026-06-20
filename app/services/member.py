@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core import plans
+from app.core.config import settings
 from app.core.context import CurrentMember
 from app.core.exceptions import ConflictError, NotFoundError, PlanLimitError, ValidationError
 from app.core.security import hash_password
@@ -23,7 +24,7 @@ from app.schemas.org import (
     MemberOut,
     MembersListResponse,
 )
-from app.services import analytics, events
+from app.services import analytics, email_templates, events
 from app.services.delivery import send_email
 from app.services.tokens import TokenService
 
@@ -226,10 +227,12 @@ class MemberService:
         url = TokenService(self.db).link_url(raw)
 
         if mode == "email_invite" and email:
+            msg = email_templates.invite(
+                org_name=admin.org.name, inviter_name=admin.user.name, url=url
+            )
             send_email(
-                to=email,
-                subject=f"{admin.user.name} added you to {admin.org.name} on TrackBit",
-                body=f"Tap to open and get started:\n{url}",
+                to=email, subject=msg.subject, body=msg.text, html=msg.html,
+                sender=settings.RESEND_FROM_LOGIN,
             )
 
         analytics.track(
@@ -316,6 +319,9 @@ class MemberService:
             raise ValidationError(
                 "This member has no email — set a new password instead.", code="no_email")
         raw = TokenService(self.db).issue_password_reset(user.id)
-        send_email(to=user.email, subject="Reset your TrackBit password",
-                   body=f"Tap to choose a new password:\n{TokenService(self.db).reset_url(raw)}")
+        msg = email_templates.password_reset(
+            url=TokenService(self.db).reset_url(raw), by_admin=True
+        )
+        send_email(to=user.email, subject=msg.subject, body=msg.text, html=msg.html,
+                   sender=settings.RESEND_FROM_LOGIN)
         return AdminResetPasswordResponse(mode="link_sent")

@@ -65,8 +65,15 @@ class Settings(BaseSettings):
     LAST_ACTIVE_THROTTLE_SECONDS: int = 300
 
     # Email (Resend). Empty key => dev console adapter (logs instead of sending).
+    # Per-purpose senders, all on the verified notify.trackbit.in domain.
+    # RESEND_FROM is the general/default identity (digests, report cards, and any
+    # mail that doesn't pick a more specific sender).
     RESEND_API_KEY: str = ""
-    RESEND_FROM: str = "TrackBit <onboarding@resend.dev>"
+    RESEND_FROM: str = "TrackBit <hello@notify.trackbit.in>"
+    # Account-access links: invites, password reset (the "login"/magic-link mails).
+    RESEND_FROM_LOGIN: str = "TrackBit <login@notify.trackbit.in>"
+    # Task reminder / overdue mails.
+    RESEND_FROM_REMINDERS: str = "TrackBit <reminders@notify.trackbit.in>"
 
     # Web Push (VAPID). Self-generated keypair; public key is exposed to the client.
     VAPID_PUBLIC_KEY: str = ""

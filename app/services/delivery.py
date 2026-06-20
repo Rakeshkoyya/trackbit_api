@@ -15,20 +15,29 @@ logger = logging.getLogger("trackbit.delivery")
 _RESEND_URL = "https://api.resend.com/emails"
 
 
-def send_email(*, to: str, subject: str, body: str) -> bool:
+def send_email(
+    *, to: str, subject: str, body: str, html: str | None = None, sender: str | None = None
+) -> bool:
+    """Send one email. `sender` overrides the from-identity; defaults to the
+    general RESEND_FROM (e.g. pass RESEND_FROM_LOGIN for account-access mails).
+    `body` is the plain-text fallback; `html` (optional) is the rich version —
+    we send both so every client renders well."""
     if not settings.RESEND_API_KEY:
         logger.info("EMAIL (stub) → %s | %s\n%s", to, subject, body)
         return True
+    payload = {
+        "from": sender or settings.RESEND_FROM,
+        "to": [to],
+        "subject": subject,
+        "text": body,
+    }
+    if html:
+        payload["html"] = html
     try:
         resp = httpx.post(
             _RESEND_URL,
             headers={"Authorization": f"Bearer {settings.RESEND_API_KEY}"},
-            json={
-                "from": settings.RESEND_FROM,
-                "to": [to],
-                "subject": subject,
-                "text": body,
-            },
+            json=payload,
             timeout=10.0,
         )
         if resp.status_code >= 400:

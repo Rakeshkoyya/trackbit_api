@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.dependencies import get_current_member
 from app.core.rate_limit import limiter
@@ -22,7 +23,7 @@ from app.schemas.auth import (
     VerifyTokenRequest,
 )
 from app.schemas.common import MessageResponse
-from app.services import analytics
+from app.services import analytics, email_templates
 from app.services.auth import AuthService
 from app.services.delivery import send_email
 from app.services.tokens import TokenService
@@ -76,8 +77,9 @@ def forgot_password(
     if user is not None and user.password_hash is not None:
         raw = TokenService(db).issue_password_reset(user.id)
         url = TokenService(db).reset_url(raw)
-        send_email(to=body.email, subject="Reset your TrackBit password",
-                   body=f"Tap to choose a new password:\n{url}")
+        msg = email_templates.password_reset(url=url, by_admin=False)
+        send_email(to=body.email, subject=msg.subject, body=msg.text, html=msg.html,
+                   sender=settings.RESEND_FROM_LOGIN)
         analytics.track(db, event=analytics.PASSWORD_RESET_REQUESTED, user_id=user.id)
     return MessageResponse(message="If that email is registered, a reset link is on its way.")
 

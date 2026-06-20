@@ -7,7 +7,15 @@ from sqlalchemy import delete, select
 
 from app.core.recurrence import next_occurrences, occurrences_in, occurs_on, validate_rule
 from app.core.timeutil import org_due_at
-from app.models import Board, Notification, Organization, TaskInstance, TaskTemplate, User
+from app.models import (
+    Board,
+    DeviceToken,
+    Notification,
+    Organization,
+    TaskInstance,
+    TaskTemplate,
+    User,
+)
 from app.services import jobs
 from tests.conftest import AdminSession
 
@@ -136,7 +144,7 @@ def test_miss_marker_flips_yesterday_open():
         db.close()
 
 
-def test_reminder_dedupe_and_sweep():
+def test_reminder_dedupe_and_sweep(monkeypatch):
     db = AdminSession()
     org_ids, user_ids = [], []
     try:
@@ -152,20 +160,82 @@ def test_reminder_dedupe_and_sweep():
         db.add(inst)
         db.flush()
 
+        from app.core.config import settings
         from app.services import notifications
 
         notifications.enqueue_reminder(db, inst)
         notifications.enqueue_reminder(db, inst)  # dedupe: still one
+
+        # Reminders are push-only now (no email fallback), so the user must have a
+        # device token to receive one. Force push stub mode for a deterministic win.
+        monkeypatch.setattr(settings, "VAPID_PRIVATE_KEY", "")
+        db.add(DeviceToken(
+            user_id=u.id, platform="webpush",
+            token=f'{{"endpoint": "https://example.com/{uuid.uuid4().hex}"}}',
+        ))
         db.commit()
         rows = list(db.scalars(
             select(Notification).where(Notification.dedupe_key == f"reminder:{inst.id}")
         ))
         assert len(rows) == 1
 
-        # Sweep delivers it (email stub/Resend → success), marking it sent.
+        # Sweep delivers it over push (stub → success), marking it sent.
         jobs.run_sweep()
         db.expire_all()
-        assert db.get(Notification, rows[0].id).status == "sent"
+        sent = db.get(Notification, rows[0].id)
+        assert sent.status == "sent"
+        assert sent.channel == "push"
+    finally:
+        for oid in org_ids:
+            db.execute(delete(Organization).where(Organization.id == oid))
+        for uid in user_ids:
+            db.execute(delete(User).where(User.id == uid))
+        db.commit()
+        db.close()
+
+
+def test_email_fallback_only_for_report_types():
+    """Email fallback is restricted to overdue / digest / report_card. A push-only
+    type (reminder) with no device token is NOT emailed; an email-eligible type
+    (overdue) with no device token still reaches the user via email."""
+    db = AdminSession()
+    org_ids, user_ids = [], []
+    try:
+        org, u, board = _mk_org(db)
+        org_ids.append(org.id)
+        user_ids.append(u.id)
+        u.email = f"gate-{uuid.uuid4().hex[:8]}@example.com"
+        inst = TaskInstance(
+            org_id=org.id, board_id=board.id, title="T", assignee_id=u.id,
+            due_at=datetime.now(UTC) - timedelta(minutes=1), status="open", created_by=u.id,
+        )
+        db.add(inst)
+        db.flush()
+
+        from app.services import notifications
+
+        past = datetime.now(UTC) - timedelta(minutes=1)
+        # push-only type — no device token means it can't be delivered (no email).
+        rem = notifications.enqueue(
+            db, org_id=org.id, user_id=u.id, instance_id=inst.id,
+            notif_type="reminder", scheduled_at=past, dedupe_key=f"reminder:{inst.id}",
+        )
+        # email-eligible type — delivered via the email stub fallback.
+        over = notifications.enqueue(
+            db, org_id=org.id, user_id=u.id, instance_id=inst.id,
+            notif_type="overdue", scheduled_at=past, dedupe_key=f"overdue:{inst.id}",
+        )
+        db.commit()
+
+        jobs.run_sweep()
+        db.expire_all()
+
+        # reminder: push-only + no device => not sent (requeued for retry).
+        assert db.get(Notification, rem.id).status != "sent"
+        # overdue: email fallback delivered it.
+        over_row = db.get(Notification, over.id)
+        assert over_row.status == "sent"
+        assert over_row.channel == "email"
     finally:
         for oid in org_ids:
             db.execute(delete(Organization).where(Organization.id == oid))
