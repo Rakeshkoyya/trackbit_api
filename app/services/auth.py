@@ -3,7 +3,7 @@
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import nulls_last, select, text
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -41,6 +41,30 @@ class AuthService:
         )
         return raw
 
+    def _set_org_scope(self, value: str) -> None:
+        """Set this transaction's RLS org scope. '' lifts scoping for legitimate
+        cross-org reads (a user may belong to many orgs); a specific org id scopes
+        writes to that org (used when seeding a brand-new org, since the request is
+        otherwise still scoped to the user's previous org)."""
+        self.db.execute(
+            text("SELECT set_config('app.current_org_id', :v, true)"), {"v": value}
+        )
+
+    def list_user_orgs(self, user_id: uuid.UUID) -> list[dict]:
+        """Every active org this user can switch into (current one included),
+        most-recently-active first. Reads across orgs, so it lifts RLS scoping."""
+        self._set_org_scope("")
+        rows = self.db.execute(
+            select(Organization, Membership.org_role)
+            .join(Membership, Membership.org_id == Organization.id)
+            .where(Membership.user_id == user_id, Membership.status == "active")
+            .order_by(nulls_last(Membership.last_active_at.desc()), Membership.created_at.asc())
+        ).all()
+        return [
+            {"id": org.id, "name": org.name, "plan": org.plan, "org_role": role}
+            for org, role in rows
+        ]
+
     def build_session(self, user: User, org: Organization, membership: Membership) -> dict:
         """Public: issue an access+refresh session (used by token-verify flows)."""
         return self._build_session(user, org, membership)
@@ -61,6 +85,7 @@ class AuthService:
             "must_set_password": user.must_set_password,
             "user": user,
             "org": org,
+            "orgs": self.list_user_orgs(user.id),
         }
 
     # ---- flows ---------------------------------------------------------
@@ -109,16 +134,63 @@ class AuthService:
         if user is None or not user.password_hash or not verify_password(password, user.password_hash):
             raise AuthError("Incorrect email/username or password.", code="bad_credentials")
 
+        # A user may now belong to several orgs — land them in the one they used
+        # most recently (they can switch from the account menu). Login is unauth'd,
+        # so RLS isn't engaged yet and this sees every membership.
         membership = self.db.scalar(
-            select(Membership).where(
-                Membership.user_id == user.id, Membership.status == "active"
-            )
+            select(Membership)
+            .where(Membership.user_id == user.id, Membership.status == "active")
+            .order_by(nulls_last(Membership.last_active_at.desc()), Membership.created_at.asc())
+            .limit(1)
         )
         if membership is None:
             raise AuthError("This account is not active in any organization.", code="no_membership")
 
         org = self.db.get(Organization, membership.org_id)
         membership.last_active_at = _now()
+        return self._build_session(user, org, membership)
+
+    def switch_org(self, user: User, target_org_id: uuid.UUID) -> dict:
+        """Issue a fresh session scoped to another org the user is a member of.
+        The new org is proven here (active membership) and then carried only in the
+        signed token — never trusted from a request param thereafter (§7.3)."""
+        self._set_org_scope("")  # look across the user's orgs
+        membership = self.db.scalar(
+            select(Membership).where(
+                Membership.user_id == user.id,
+                Membership.org_id == target_org_id,
+                Membership.status == "active",
+            )
+        )
+        if membership is None:
+            raise AuthError("You are not a member of that organization.", code="not_member")
+        org = self.db.get(Organization, target_org_id)
+        membership.last_active_at = _now()
+        return self._build_session(user, org, membership)
+
+    def create_org(self, user: User, *, org_name: str, tz: str) -> dict:
+        """Create a new org owned by an already-signed-in user, then switch into it.
+        Mirrors register_org's tail but reuses the existing user (no new account)."""
+        org = Organization(name=org_name, timezone=tz)
+        self.db.add(org)
+        self.db.flush()
+        # The seed rows below belong to the NEW org; point RLS there so the
+        # memberships/boards WITH CHECK policy passes (the request is still scoped
+        # to the user's previous org).
+        self._set_org_scope(str(org.id))
+        membership = Membership(
+            org_id=org.id, user_id=user.id, org_role="admin", last_active_at=_now()
+        )
+        self.db.add(membership)
+        general = Board(
+            org_id=org.id, name="General", visibility="public", category="tasks",
+            created_by=user.id, owner_id=user.id,
+        )
+        self.db.add(general)
+        self.db.flush()
+        self.db.add(BoardMember(board_id=general.id, user_id=user.id))
+        self.db.flush()
+        analytics.track(self.db, event=analytics.ORG_REGISTERED, org_id=org.id, user_id=user.id)
         return self._build_session(user, org, membership)
 
     def update_profile(self, user: User, *, name: str) -> None:

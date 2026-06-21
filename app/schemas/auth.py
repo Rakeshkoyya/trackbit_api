@@ -51,6 +51,15 @@ class VerifyTokenRequest(BaseModel):
     token: str
 
 
+class SwitchOrgRequest(BaseModel):
+    org_id: uuid.UUID
+
+
+class CreateOrgRequest(BaseModel):
+    org_name: str = Field(min_length=1, max_length=120)
+    timezone: str = "Asia/Kolkata"
+
+
 class UserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
@@ -68,6 +77,14 @@ class OrgOut(BaseModel):
     plan: str
 
 
+class OrgMembershipOut(BaseModel):
+    """One org the signed-in user is an active member of — drives the switcher."""
+    id: uuid.UUID
+    name: str
+    plan: str
+    org_role: str
+
+
 class SessionResponse(BaseModel):
     access_token: str
     refresh_token: str
@@ -76,6 +93,8 @@ class SessionResponse(BaseModel):
     must_set_password: bool = False
     user: UserOut
     org: OrgOut
+    # Every org this user can switch into (includes the current one).
+    orgs: list[OrgMembershipOut] = []
 
 
 class MeResponse(BaseModel):
@@ -83,3 +102,4 @@ class MeResponse(BaseModel):
     must_set_password: bool = False
     user: UserOut
     org: OrgOut
+    orgs: list[OrgMembershipOut] = []

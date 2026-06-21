@@ -11,6 +11,7 @@ from app.core.rate_limit import limiter
 from app.models import User
 from app.schemas.auth import (
     ChangePasswordRequest,
+    CreateOrgRequest,
     ForgotPasswordRequest,
     LoginRequest,
     MeResponse,
@@ -19,6 +20,7 @@ from app.schemas.auth import (
     ResetPasswordRequest,
     SessionResponse,
     SetPasswordRequest,
+    SwitchOrgRequest,
     UpdateProfileRequest,
     VerifyTokenRequest,
 )
@@ -105,10 +107,38 @@ def verify(request: Request, body: VerifyTokenRequest, db: Session = Depends(get
 
 
 @router.get("/me", response_model=MeResponse)
-def me(member=Depends(get_current_member)) -> MeResponse:
+def me(member=Depends(get_current_member), db: Session = Depends(get_db)) -> MeResponse:
     return MeResponse(
         org_role=member.org_role, must_set_password=member.user.must_set_password,
         user=member.user, org=member.org,
+        orgs=AuthService(db).list_user_orgs(member.user_id),
+    )
+
+
+@router.post("/switch-org", response_model=SessionResponse)
+@limiter.limit("30/minute")
+def switch_org(
+    request: Request,
+    body: SwitchOrgRequest,
+    member=Depends(get_current_member),
+    db: Session = Depends(get_db),
+) -> SessionResponse:
+    """Switch the active org: returns a new session scoped to another org the
+    signed-in user belongs to. The frontend swaps tokens and reloads."""
+    return SessionResponse(**AuthService(db).switch_org(member.user, body.org_id))
+
+
+@router.post("/orgs", response_model=SessionResponse)
+@limiter.limit("10/minute")
+def create_org(
+    request: Request,
+    body: CreateOrgRequest,
+    member=Depends(get_current_member),
+    db: Session = Depends(get_db),
+) -> SessionResponse:
+    """Create a new organization owned by the signed-in user and switch into it."""
+    return SessionResponse(
+        **AuthService(db).create_org(member.user, org_name=body.org_name, tz=body.timezone)
     )
 
 

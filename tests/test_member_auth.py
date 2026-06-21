@@ -324,17 +324,97 @@ def test_invite_brand_new_returns_link_and_pending(client, unique_email, cleanup
     assert dup.status_code == 409 and dup.json()["error"]["code"] == "already_member"
 
 
-def test_invite_email_registered_to_another_org_is_blocked(client, unique_email, cleanup):
-    # An email that already belongs to a user in a *different* org (here, that org's
-    # founder) must not be silently pulled into this org — v2 is one-user-one-org.
+def test_invite_email_registered_to_another_org_joins(client, unique_email, cleanup):
+    # TrackBit is multi-org: inviting an email that already has an account adds that
+    # account to THIS org as a new membership (it must not error). The person can
+    # then switch into the org.
     other_email = f"owner-{uuid.uuid4().hex[:8]}@example.com"
-    _register_admin(client, other_email, cleanup)  # org A + user(other_email)
+    a = _register_admin(client, other_email, cleanup)  # org A + user(other_email)
 
     h = _admin_headers(client, unique_email, cleanup)  # org B admin
     resp = client.post("/api/v1/org/members/invite", headers=h,
                        json={"name": "Taken", "email": other_email, "role": "member"})
-    assert resp.status_code == 409, resp.text
-    assert resp.json()["error"]["code"] == "email_in_use"
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["user_id"] == a["user"]["id"]  # same global account, no new user
+
+    # They now appear as a member of org B,
+    members = client.get("/api/v1/org/members", headers=h).json()["members"]
+    assert any(m["email"] == other_email for m in members)
+
+    # and logging in as them lists BOTH orgs in the switcher payload.
+    sess = client.post("/api/v1/auth/login",
+                       json={"identifier": other_email, "password": "ownerpass1"})
+    assert sess.status_code == 200, sess.text
+    org_ids = {o["id"] for o in sess.json()["orgs"]}
+    assert a["org"]["id"] in org_ids and len(org_ids) >= 2
+
+
+# --------------------------------------------------------------------------
+# Multi-tenancy: create org, switch org, default-org-at-login
+# --------------------------------------------------------------------------
+def test_me_includes_orgs_list(client, unique_email, cleanup):
+    reg = _register_admin(client, unique_email, cleanup)
+    h = {"Authorization": f"Bearer {reg['access_token']}"}
+    # register response and /me both carry the switcher list.
+    assert reg["orgs"][0]["id"] == reg["org"]["id"]
+    me = client.get("/api/v1/auth/me", headers=h).json()
+    assert len(me["orgs"]) == 1
+    assert me["orgs"][0]["id"] == reg["org"]["id"]
+    assert me["orgs"][0]["org_role"] == "admin"
+
+
+def test_create_org_and_switch(client, unique_email, cleanup):
+    reg = _register_admin(client, unique_email, cleanup)  # org A
+    h = {"Authorization": f"Bearer {reg['access_token']}"}
+    org_a_id = reg["org"]["id"]
+
+    # Create a second org while signed in -> the session switches into it.
+    created = client.post("/api/v1/auth/orgs", headers=h, json={"org_name": "Second Org"})
+    assert created.status_code == 200, created.text
+    body = created.json()
+    cleanup["orgs"].append(uuid.UUID(body["org"]["id"]))
+    org_b_id = body["org"]["id"]
+    assert org_b_id != org_a_id
+    assert body["org"]["name"] == "Second Org" and body["org_role"] == "admin"
+    assert {o["id"] for o in body["orgs"]} == {org_a_id, org_b_id}
+
+    # The returned token is scoped to org B.
+    hb = {"Authorization": f"Bearer {body['access_token']}"}
+    assert client.get("/api/v1/auth/me", headers=hb).json()["org"]["id"] == org_b_id
+
+    # Switch back to org A.
+    switched = client.post("/api/v1/auth/switch-org", headers=hb, json={"org_id": org_a_id})
+    assert switched.status_code == 200, switched.text
+    assert switched.json()["org"]["id"] == org_a_id
+    ha = {"Authorization": f"Bearer {switched.json()['access_token']}"}
+    assert client.get("/api/v1/auth/me", headers=ha).json()["org"]["id"] == org_a_id
+
+
+def test_switch_to_non_member_org_rejected(client, unique_email, cleanup):
+    reg = _register_admin(client, unique_email, cleanup)  # our user (org A)
+    stranger = _register_admin(client, f"x-{uuid.uuid4().hex[:8]}@example.com", cleanup)  # org C
+    h = {"Authorization": f"Bearer {reg['access_token']}"}
+    resp = client.post("/api/v1/auth/switch-org", headers=h,
+                       json={"org_id": stranger["org"]["id"]})
+    assert resp.status_code == 401, resp.text
+    assert resp.json()["error"]["code"] == "not_member"
+
+
+def test_login_lands_in_most_recently_active_org(client, unique_email, cleanup):
+    reg = _register_admin(client, unique_email, cleanup)  # org A
+    h = {"Authorization": f"Bearer {reg['access_token']}"}
+    org_a_id = reg["org"]["id"]
+    created = client.post("/api/v1/auth/orgs", headers=h, json={"org_name": "MRA Second"})
+    org_b_id = created.json()["org"]["id"]
+    cleanup["orgs"].append(uuid.UUID(org_b_id))
+    # Touch org A last (switch into it) so it becomes most-recently-active.
+    hb = {"Authorization": f"Bearer {created.json()['access_token']}"}
+    client.post("/api/v1/auth/switch-org", headers=hb, json={"org_id": org_a_id})
+    # A fresh login lands in org A.
+    sess = client.post("/api/v1/auth/login",
+                       json={"identifier": unique_email, "password": "ownerpass1"})
+    assert sess.status_code == 200, sess.text
+    assert sess.json()["org"]["id"] == org_a_id
 
 
 def test_admin_reset_username_user(client, unique_email, cleanup):
