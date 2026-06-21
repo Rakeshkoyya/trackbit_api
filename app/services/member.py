@@ -232,7 +232,9 @@ class MemberService:
             )
             send_email(
                 to=email, subject=msg.subject, body=msg.text, html=msg.html,
-                sender=settings.RESEND_FROM_LOGIN,
+                # Invites send from the general hello@ sender, not login@: an invite
+                # is an onboarding welcome rather than an account-access/reset link.
+                sender=settings.RESEND_FROM,
             )
 
         analytics.track(
