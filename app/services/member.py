@@ -194,14 +194,9 @@ class MemberService:
         if user is not None:
             if existing and existing.status == "active":
                 raise ConflictError("This person is already a member.", code="already_member")
-            if existing is None:
-                # The email/phone already belongs to an account that isn't part of
-                # this org. v2 is one-user-one-org, so don't silently attach a
-                # stranger's account — surface it instead of a quiet "invite sent".
-                raise ConflictError(
-                    "That email is already registered to another account.",
-                    code="email_in_use",
-                )
+            # existing is None -> the account exists but isn't in THIS org yet.
+            # TrackBit is multi-org: add them as a new membership below so they can
+            # switch into this org (the invite link logs them straight in).
             # existing && not active -> a former member of THIS org: reactivate below.
         else:
             # Brand-new staffer: no password yet — they set it on first login.
@@ -232,7 +227,9 @@ class MemberService:
             )
             send_email(
                 to=email, subject=msg.subject, body=msg.text, html=msg.html,
-                sender=settings.RESEND_FROM_LOGIN,
+                # Invites send from the general hello@ sender, not login@: an invite
+                # is an onboarding welcome rather than an account-access/reset link.
+                sender=settings.RESEND_FROM,
             )
 
         analytics.track(
