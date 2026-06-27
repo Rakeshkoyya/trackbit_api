@@ -12,7 +12,13 @@ from app.core.context import CurrentMember
 from app.core.exceptions import ConflictError, ForbiddenError, NotFoundError, ValidationError
 from app.core.recurrence import occurs_on
 from app.core.timeutil import org_day_bounds
-from app.core.visibility import assignable_pool, can_view_board, is_assignable
+from app.core.visibility import (
+    assignable_pool,
+    can_view_all_tasks,
+    can_view_board,
+    can_view_task,
+    is_assignable,
+)
 from app.models import Board, BoardCategory, TaskEvent, TaskInstance, TaskTemplate
 from app.schemas.board import BoardGroup, BoardRow, BoardTableResponse
 from app.schemas.task import (
@@ -70,6 +76,13 @@ class TaskService:
         if not can_view_board(self.db, board=board, user_id=member.user_id):
             # Don't reveal existence of private boards the user can't see.
             raise NotFoundError("Board")
+
+    def _sees_all_tasks(self, member: CurrentMember, board: Board) -> bool:
+        """False only for a regular member on a privacy board — they're limited
+        to their own tasks (see core/visibility.py)."""
+        return can_view_all_tasks(
+            board=board, user_id=member.user_id, is_admin=member.is_admin
+        )
 
     # ---- serialization -------------------------------------------------
     def _serialize_many(self, member: CurrentMember, instances: list[TaskInstance]) -> list[TaskOut]:
@@ -188,6 +201,12 @@ class TaskService:
         inst = self._get_instance(instance_id)
         board = self._get_board(inst.board_id)
         self._require_viewable(member, board)
+        # Privacy board: a member may only open their own task (don't leak others').
+        if not can_view_task(
+            board=board, assignee_id=inst.assignee_id,
+            user_id=member.user_id, is_admin=member.is_admin,
+        ):
+            raise NotFoundError("Task")
         base = self._serialize_one(member, inst)
         pool_ids = assignable_pool(self.db, board=board)
         pool_names = events.resolve_user_names(self.db, pool_ids)
@@ -211,6 +230,8 @@ class TaskService:
         )
         if not include_done:
             stmt = stmt.where(TaskInstance.status != "done")
+        if not self._sees_all_tasks(member, board):
+            stmt = stmt.where(TaskInstance.assignee_id == member.user_id)
         stmt = stmt.order_by(TaskInstance.status, TaskInstance.due_at.nulls_last(),
                              TaskInstance.created_at)
         return self._serialize_many(member, list(self.db.scalars(stmt)))
@@ -239,23 +260,25 @@ class TaskService:
         self._require_viewable(member, board)
         _, _, now_local = org_day_bounds(member.org.timezone)
         today = now_local.date()
+        # Privacy board: a regular member only sees rows that are theirs — their
+        # one-time tasks and recurring templates defaulting to them.
+        sees_all = self._sees_all_tasks(member, board)
 
-        one_time = list(
-            self.db.scalars(
-                select(TaskInstance).where(
-                    TaskInstance.board_id == board_id,
-                    TaskInstance.template_id.is_(None),
-                    TaskInstance.status.notin_(_HIDDEN_STATUSES),
-                ).order_by(TaskInstance.created_at)
-            )
+        one_time_q = select(TaskInstance).where(
+            TaskInstance.board_id == board_id,
+            TaskInstance.template_id.is_(None),
+            TaskInstance.status.notin_(_HIDDEN_STATUSES),
         )
-        templates = list(
-            self.db.scalars(
-                select(TaskTemplate).where(
-                    TaskTemplate.board_id == board_id, TaskTemplate.active.is_(True)
-                ).order_by(TaskTemplate.title)
-            )
+        templates_q = select(TaskTemplate).where(
+            TaskTemplate.board_id == board_id, TaskTemplate.active.is_(True)
         )
+        if not sees_all:
+            one_time_q = one_time_q.where(TaskInstance.assignee_id == member.user_id)
+            templates_q = templates_q.where(
+                TaskTemplate.default_assignee_id == member.user_id
+            )
+        one_time = list(self.db.scalars(one_time_q.order_by(TaskInstance.created_at)))
+        templates = list(self.db.scalars(templates_q.order_by(TaskTemplate.title)))
         # Today's materialized instance per template (for the check/claim action).
         today_by_tmpl: dict[uuid.UUID, TaskInstance] = {}
         if templates:
@@ -419,8 +442,20 @@ class TaskService:
 
         if req.is_critical:
             plans.enforce_critical_allowed(member.org)
-        if req.assignee_id is not None and not is_assignable(
-            self.db, board=board, user_id=req.assignee_id
+
+        # Privacy board: a regular member can only put a task on themselves
+        # (they can't see anyone else's work, so they can't hand it off either).
+        assignee_id = req.assignee_id
+        if not self._sees_all_tasks(member, board):
+            if assignee_id is not None and assignee_id != member.user_id:
+                raise ForbiddenError(
+                    "On this board you can only assign tasks to yourself.",
+                    code="self_assign_only",
+                )
+            assignee_id = member.user_id
+
+        if assignee_id is not None and not is_assignable(
+            self.db, board=board, user_id=assignee_id
         ):
             raise ValidationError("That person can't be assigned on this board.",
                                   code="not_assignable")
@@ -432,7 +467,7 @@ class TaskService:
             description=req.description,
             category=req.category,
             priority=req.priority,
-            assignee_id=req.assignee_id,
+            assignee_id=assignee_id,
             due_at=req.due_at,
             all_day=req.all_day,
             is_critical=req.is_critical,
@@ -446,15 +481,15 @@ class TaskService:
                             event_type="created", actor_id=member.user_id)
         analytics.track(self.db, event=analytics.TASK_CREATED, org_id=member.org_id,
                         user_id=member.user_id, props={"board_id": str(board.id)})
-        if req.assignee_id is not None:
+        if assignee_id is not None:
             events.append_event(self.db, org_id=member.org_id, instance_id=inst.id,
                                 event_type="assigned", actor_id=member.user_id,
-                                payload={"to": str(req.assignee_id)})
+                                payload={"to": str(assignee_id)})
             analytics.track(self.db, event=analytics.TASK_ASSIGNED, org_id=member.org_id,
                             user_id=member.user_id)
-            if req.assignee_id != member.user_id:
+            if assignee_id != member.user_id:
                 notifications.enqueue_instant(
-                    self.db, org_id=member.org_id, user_id=req.assignee_id,
+                    self.db, org_id=member.org_id, user_id=assignee_id,
                     instance_id=inst.id, notif_type="assigned", actor_name=member.user.name,
                 )
         notifications.enqueue_reminder(self.db, inst)
@@ -498,6 +533,12 @@ class TaskService:
         inst = self._get_instance(instance_id)
         board = self._get_board(inst.board_id)
         self._require_viewable(member, board)
+        # Privacy board: no open claim pool — tasks are assigned directly.
+        if board.task_scope == "assigned":
+            raise ForbiddenError(
+                "Claiming is off for this board — tasks are assigned directly.",
+                code="claim_disabled",
+            )
         if not is_assignable(self.db, board=board, user_id=member.user_id):
             raise ForbiddenError("You can't claim tasks on this board.", code="not_assignable")
 
@@ -529,6 +570,11 @@ class TaskService:
         inst = self._get_instance(instance_id)
         board = self._get_board(inst.board_id)
         self._require_viewable(member, board)
+        if not self._sees_all_tasks(member, board):
+            raise ForbiddenError(
+                "Only the board owner can change who a task is assigned to here.",
+                code="assign_restricted",
+            )
         if not is_assignable(self.db, board=board, user_id=to_user_id):
             raise ValidationError("That person can't be assigned on this board.",
                                   code="not_assignable")
@@ -561,6 +607,11 @@ class TaskService:
         inst = self._get_instance(instance_id)
         board = self._get_board(inst.board_id)
         self._require_viewable(member, board)
+        if not self._sees_all_tasks(member, board):
+            raise ForbiddenError(
+                "Only the board owner can change who a task is assigned to here.",
+                code="assign_restricted",
+            )
         if inst.status in ("done", "cancelled"):
             raise ConflictError("This task is closed.", code="task_closed")
         from_id = inst.assignee_id

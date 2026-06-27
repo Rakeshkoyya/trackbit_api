@@ -24,6 +24,11 @@ class Board(Base, UUIDPKMixin, CreatedAtMixin):
     )
     name: Mapped[str] = mapped_column(Text, nullable=False)
     visibility: Mapped[str] = mapped_column(Text, nullable=False, server_default="public")
+    # Per-board task privacy (member request). 'all' = open model: every viewer
+    # sees every task (default, legacy). 'assigned' = members see ONLY tasks
+    # assigned to them; only the owner/admins see the full list + the report.
+    # Orthogonal to `visibility` (who can open the board at all).
+    task_scope: Mapped[str] = mapped_column(Text, nullable=False, server_default="all")
     # View preset only — same data model either way (PRD §4.1).
     category: Mapped[str] = mapped_column(Text, nullable=False, server_default="tasks")
     created_by: Mapped[uuid.UUID] = mapped_column(
@@ -41,6 +46,7 @@ class Board(Base, UUIDPKMixin, CreatedAtMixin):
 
     __table_args__ = (
         CheckConstraint("visibility IN ('public', 'private')", name="visibility_valid"),
+        CheckConstraint("task_scope IN ('all', 'assigned')", name="task_scope_valid"),
         CheckConstraint("category IN ('tasks', 'checklist')", name="category_valid"),
         Index("ix_boards_org_visibility", "org_id", "visibility"),
     )

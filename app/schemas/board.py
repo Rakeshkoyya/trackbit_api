@@ -12,6 +12,7 @@ class BoardListItem(BaseModel):
     id: uuid.UUID
     name: str
     visibility: str
+    task_scope: str = "all"
     category: str
     done_today: int = 0
     total_today: int = 0
@@ -34,6 +35,7 @@ class BoardOut(BaseModel):
     id: uuid.UUID
     name: str
     visibility: str
+    task_scope: str = "all"
     category: str
     owner_id: uuid.UUID
     archived: bool = False
@@ -45,12 +47,14 @@ class BoardOut(BaseModel):
 class BoardCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     visibility: str = Field(default="public", pattern="^(public|private)$")
+    task_scope: str = Field(default="all", pattern="^(all|assigned)$")
     category: str = Field(default="tasks", pattern="^(tasks|checklist)$")
 
 
 class BoardUpdateRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     visibility: str | None = Field(default=None, pattern="^(public|private)$")
+    task_scope: str | None = Field(default=None, pattern="^(all|assigned)$")
     category: str | None = Field(default=None, pattern="^(tasks|checklist)$")
     archived: bool | None = None
 
