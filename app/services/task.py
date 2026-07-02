@@ -523,6 +523,40 @@ class TaskService:
         analytics.track(self.db, event=analytics.TASK_CLAIMED, org_id=member.org_id,
                         user_id=member.user_id)
         return self._serialize_one(member, inst)
+    def release(self, member: CurrentMember, instance_id: uuid.UUID) -> TaskOut:
+        inst = self._get_instance(instance_id)
+        board = self._get_board(inst.board_id)
+        self._require_viewable(member, board)
+
+        if inst.assignee_id != member.user_id:
+            raise ForbiddenError(
+                "Only the current assignee can release this task.",
+                code="not_assignee",
+            )
+
+        if inst.status in ("done", "cancelled"):
+            raise ConflictError(
+                "This task is closed.",
+                code="task_closed",
+            )
+
+        inst.assignee_id = None
+        self.db.flush()
+
+        events.append_event(
+            self.db,
+            org_id=member.org_id,
+            instance_id=inst.id,
+            event_type="edited",
+            actor_id=member.user_id,
+            payload={"assignee_id": [str(member.user_id), None]},
+        )
+
+        notifications.reset_reminder(self.db, inst)
+
+        return self._serialize_one(member, inst)
+    
+    
 
     def reassign(self, member: CurrentMember, instance_id: uuid.UUID,
                  to_user_id: uuid.UUID) -> TaskOut:

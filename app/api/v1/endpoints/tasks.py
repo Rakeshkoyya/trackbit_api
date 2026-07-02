@@ -81,8 +81,13 @@ def claim_task(
     db: Session = Depends(get_db),
 ) -> TaskOut:
     return TaskService(db).claim(member, task_id)
-
-
+@router.post("/{task_id}/release", response_model=TaskOut)
+def release_task(
+    task_id: uuid.UUID,
+    member: CurrentMember = Depends(get_current_member),
+    db: Session = Depends(get_db),
+) -> TaskOut:
+    return TaskService(db).release(member, task_id)
 @router.post("/{task_id}/reassign", response_model=TaskOut)
 def reassign_task(
     task_id: uuid.UUID,
