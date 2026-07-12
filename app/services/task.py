@@ -440,20 +440,12 @@ class TaskService:
         board = self._get_board(req.board_id)
         self._require_viewable(member, board)  # open model: any viewer can add
 
-        if req.is_critical:
-            plans.enforce_critical_allowed(member.org)
-
-        # Privacy board: a regular member can only put a task on themselves
-        # (they can't see anyone else's work, so they can't hand it off either).
         assignee_id = req.assignee_id
-        if not self._sees_all_tasks(member, board):
-            if assignee_id is not None and assignee_id != member.user_id:
-                raise ForbiddenError(
-                    "On this board you can only assign tasks to yourself.",
-                    code="self_assign_only",
-                )
+        if assignee_id is None and board.visibility == "private":
             assignee_id = member.user_id
 
+        if req.is_critical:
+            plans.enforce_critical_allowed(member.org)
         if assignee_id is not None and not is_assignable(
             self.db, board=board, user_id=assignee_id
         ):
@@ -564,6 +556,40 @@ class TaskService:
         analytics.track(self.db, event=analytics.TASK_CLAIMED, org_id=member.org_id,
                         user_id=member.user_id)
         return self._serialize_one(member, inst)
+    def release(self, member: CurrentMember, instance_id: uuid.UUID) -> TaskOut:
+        inst = self._get_instance(instance_id)
+        board = self._get_board(inst.board_id)
+        self._require_viewable(member, board)
+
+        if inst.assignee_id != member.user_id:
+            raise ForbiddenError(
+                "Only the current assignee can release this task.",
+                code="not_assignee",
+            )
+
+        if inst.status in ("done", "cancelled"):
+            raise ConflictError(
+                "This task is closed.",
+                code="task_closed",
+            )
+
+        inst.assignee_id = None
+        self.db.flush()
+
+        events.append_event(
+            self.db,
+            org_id=member.org_id,
+            instance_id=inst.id,
+            event_type="edited",
+            actor_id=member.user_id,
+            payload={"assignee_id": [str(member.user_id), None]},
+        )
+
+        notifications.reset_reminder(self.db, inst)
+
+        return self._serialize_one(member, inst)
+    
+    
 
     def reassign(self, member: CurrentMember, instance_id: uuid.UUID,
                  to_user_id: uuid.UUID) -> TaskOut:
