@@ -417,10 +417,14 @@ class TaskService:
         board = self._get_board(req.board_id)
         self._require_viewable(member, board)  # open model: any viewer can add
 
+        assignee_id = req.assignee_id
+        if assignee_id is None and board.visibility == "private":
+            assignee_id = member.user_id
+
         if req.is_critical:
             plans.enforce_critical_allowed(member.org)
-        if req.assignee_id is not None and not is_assignable(
-            self.db, board=board, user_id=req.assignee_id
+        if assignee_id is not None and not is_assignable(
+            self.db, board=board, user_id=assignee_id
         ):
             raise ValidationError("That person can't be assigned on this board.",
                                   code="not_assignable")
@@ -432,7 +436,7 @@ class TaskService:
             description=req.description,
             category=req.category,
             priority=req.priority,
-            assignee_id=req.assignee_id,
+            assignee_id=assignee_id,
             due_at=req.due_at,
             all_day=req.all_day,
             is_critical=req.is_critical,
@@ -446,15 +450,15 @@ class TaskService:
                             event_type="created", actor_id=member.user_id)
         analytics.track(self.db, event=analytics.TASK_CREATED, org_id=member.org_id,
                         user_id=member.user_id, props={"board_id": str(board.id)})
-        if req.assignee_id is not None:
+        if assignee_id is not None:
             events.append_event(self.db, org_id=member.org_id, instance_id=inst.id,
                                 event_type="assigned", actor_id=member.user_id,
-                                payload={"to": str(req.assignee_id)})
+                                payload={"to": str(assignee_id)})
             analytics.track(self.db, event=analytics.TASK_ASSIGNED, org_id=member.org_id,
                             user_id=member.user_id)
-            if req.assignee_id != member.user_id:
+            if assignee_id != member.user_id:
                 notifications.enqueue_instant(
-                    self.db, org_id=member.org_id, user_id=req.assignee_id,
+                    self.db, org_id=member.org_id, user_id=assignee_id,
                     instance_id=inst.id, notif_type="assigned", actor_name=member.user.name,
                 )
         notifications.enqueue_reminder(self.db, inst)
