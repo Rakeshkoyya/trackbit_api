@@ -64,6 +64,34 @@ def is_assignable(db: Session, *, board: Board, user_id: uuid.UUID) -> bool:
     return user_id in assignable_pool(db, board=board)
 
 
-def board_report_scope(db: Session, *, board: Board, user_id: uuid.UUID) -> bool:
-    """Board reports are visible to whoever can see the board."""
-    return can_view_board(db, board=board, user_id=user_id)
+def can_view_all_tasks(*, board: Board, user_id: uuid.UUID, is_admin: bool) -> bool:
+    """Within a board the user can already open, may they see *every* task?
+
+    On a privacy board (``task_scope == 'assigned'``) only the owner and org
+    admins do; regular members are limited to tasks assigned to them. On an
+    ``'all'`` board everyone who can view the board sees everything (legacy open
+    model). This is the row-level companion to ``can_view_board``.
+    """
+    if board.task_scope != "assigned":
+        return True
+    return is_admin or board.owner_id == user_id
+
+
+def can_view_task(
+    *, board: Board, assignee_id: uuid.UUID | None, user_id: uuid.UUID, is_admin: bool
+) -> bool:
+    """Row-level check: caller must be able to see the board first."""
+    if can_view_all_tasks(board=board, user_id=user_id, is_admin=is_admin):
+        return True
+    return assignee_id is not None and assignee_id == user_id
+
+
+def board_report_scope(
+    db: Session, *, board: Board, user_id: uuid.UUID, is_admin: bool
+) -> bool:
+    """Board reports are visible to whoever can see the board — except on a
+    privacy board, where only the owner/admins get them (regular members see
+    only their own tasks, so a board-wide report isn't theirs to view)."""
+    if not can_view_board(db, board=board, user_id=user_id):
+        return False
+    return can_view_all_tasks(board=board, user_id=user_id, is_admin=is_admin)

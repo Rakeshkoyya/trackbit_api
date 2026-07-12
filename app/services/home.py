@@ -69,15 +69,18 @@ class HomeService:
         )
         board_cache: dict = {}
 
-        def viewable(board_id) -> bool:
+        def claimable_board(board_id) -> bool:
+            # Privacy boards ('assigned') have no open claim pool — skip them.
             if board_id not in board_cache:
                 b = self.db.get(Board, board_id)
                 board_cache[board_id] = (
-                    b is not None and can_view_board(self.db, board=b, user_id=member.user_id)
+                    b is not None
+                    and b.task_scope == "all"
+                    and can_view_board(self.db, board=b, user_id=member.user_id)
                 )
             return board_cache[board_id]
 
-        claimable = [t for t in unassigned if viewable(t.board_id)]
+        claimable = [t for t in unassigned if claimable_board(t.board_id)]
         claimable.sort(key=lambda t: (t.due_at is None, t.due_at or t.created_at))
 
         # Day progress: tasks I completed today.

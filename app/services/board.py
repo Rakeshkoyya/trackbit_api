@@ -77,7 +77,8 @@ class BoardService:
         def to_item(b: Board) -> BoardListItem:
             r = comp.get(b.id)
             return BoardListItem(
-                id=b.id, name=b.name, visibility=b.visibility, category=b.category,
+                id=b.id, name=b.name, visibility=b.visibility,
+                task_scope=b.task_scope, category=b.category,
                 total_today=r.total_today if r else 0, done_today=r.done_today if r else 0,
                 total=r.total if r else 0, done=r.done if r else 0,
                 is_owner=(b.owner_id == member.user_id),
@@ -95,7 +96,8 @@ class BoardService:
         bm = list(self.db.scalars(select(BoardMember.user_id).where(BoardMember.board_id == board_id)))
         names = events.resolve_user_names(self.db, set(bm))
         return BoardOut(
-            id=board.id, name=board.name, visibility=board.visibility, category=board.category,
+            id=board.id, name=board.name, visibility=board.visibility,
+            task_scope=board.task_scope, category=board.category,
             owner_id=board.owner_id, archived=board.archived_at is not None,
             can_manage=self._can_manage(member, board),
             members=[BoardMemberOut(user_id=u, name=names.get(u, "—")) for u in bm],
@@ -106,7 +108,8 @@ class BoardService:
         plans.enforce_board_quota(self.db, member.org)
         board = Board(
             org_id=member.org_id, name=req.name, visibility=req.visibility,
-            category=req.category, created_by=member.user_id, owner_id=member.user_id,
+            task_scope=req.task_scope, category=req.category,
+            created_by=member.user_id, owner_id=member.user_id,
         )
         self.db.add(board)
         self.db.flush()
@@ -141,6 +144,8 @@ class BoardService:
 
         if req.name is not None:
             board.name = req.name
+        if req.task_scope is not None:
+            board.task_scope = req.task_scope
         if req.category is not None:
             board.category = req.category
         if req.archived is not None:

@@ -17,7 +17,7 @@ from app.core.context import CurrentMember
 from app.core.exceptions import ForbiddenError, NotFoundError
 from app.core.recurrence import due_time, next_occurrences, occurs_on, validate_rule
 from app.core.timeutil import org_day_bounds, org_due_at
-from app.core.visibility import can_view_board, is_assignable
+from app.core.visibility import can_view_all_tasks, can_view_board, is_assignable
 from app.models import Board, Organization, TaskInstance, TaskTemplate
 from app.schemas.recurrence import (
     RecurringDay,
@@ -44,6 +44,13 @@ class RecurringService:
     def _require_viewable(self, member: CurrentMember, board: Board) -> None:
         if not can_view_board(self.db, board=board, user_id=member.user_id):
             raise NotFoundError("Board")
+
+    def _sees_all(self, member: CurrentMember, board: Board) -> bool:
+        """False only for a regular member on a privacy board — they're limited to
+        recurring tasks that default to them (mirrors TaskService)."""
+        return can_view_all_tasks(
+            board=board, user_id=member.user_id, is_admin=member.is_admin
+        )
 
     def _get(self, template_id: uuid.UUID) -> TaskTemplate:
         t = self.db.get(TaskTemplate, template_id)
@@ -72,9 +79,11 @@ class RecurringService:
     def list_for_board(self, member: CurrentMember, board_id: uuid.UUID) -> list[RecurringTemplateOut]:
         board = self._board(board_id)
         self._require_viewable(member, board)
-        rows = self.db.scalars(
-            select(TaskTemplate).where(TaskTemplate.board_id == board_id).order_by(TaskTemplate.title)
-        )
+        stmt = select(TaskTemplate).where(TaskTemplate.board_id == board_id)
+        # Privacy board: a member only sees recurring tasks that default to them.
+        if not self._sees_all(member, board):
+            stmt = stmt.where(TaskTemplate.default_assignee_id == member.user_id)
+        rows = self.db.scalars(stmt.order_by(TaskTemplate.title))
         return [self._serialize(t) for t in rows]
 
     def history(self, member: CurrentMember, template_id: uuid.UUID) -> RecurringHistoryOut:
@@ -83,6 +92,9 @@ class RecurringService:
         t = self._get(template_id)
         board = self._board(t.board_id)
         self._require_viewable(member, board)
+        # Privacy board: members may only open a recurring task that's theirs.
+        if not self._sees_all(member, board) and t.default_assignee_id != member.user_id:
+            raise NotFoundError("Recurring task")
         _, _, now_local = org_day_bounds(member.org.timezone)
         today = now_local.date()
         insts = list(
@@ -121,8 +133,20 @@ class RecurringService:
         rule = validate_rule(req.recurrence)
         if req.is_critical:
             plans.enforce_critical_allowed(member.org)
-        if req.default_assignee_id is not None and not is_assignable(
-            self.db, board=board, user_id=req.default_assignee_id
+
+        # Privacy board: a regular member can only schedule recurring work for
+        # themselves (same rule as one-time task creation).
+        default_assignee_id = req.default_assignee_id
+        if not self._sees_all(member, board):
+            if default_assignee_id is not None and default_assignee_id != member.user_id:
+                raise ForbiddenError(
+                    "On this board you can only assign tasks to yourself.",
+                    code="self_assign_only",
+                )
+            default_assignee_id = member.user_id
+
+        if default_assignee_id is not None and not is_assignable(
+            self.db, board=board, user_id=default_assignee_id
         ):
             raise ForbiddenError("That person can't be assigned on this board.",
                                  code="not_assignable")
@@ -131,7 +155,7 @@ class RecurringService:
             org_id=member.org_id, board_id=board.id, title=req.title,
             description=req.description, category=req.category, priority=req.priority,
             recurrence_rule=rule,
-            default_assignee_id=req.default_assignee_id, active=True,
+            default_assignee_id=default_assignee_id, active=True,
             is_critical=req.is_critical, remind_before_minutes=req.remind_before_minutes,
             created_by=member.user_id,
         )
@@ -148,6 +172,11 @@ class RecurringService:
         t = self._get(template_id)
         board = self._board(t.board_id)
         self._require_viewable(member, board)
+        if not self._sees_all(member, board):
+            raise ForbiddenError(
+                "Only the board owner can change recurring tasks here.",
+                code="recurring_restricted",
+            )
         data = req.model_dump(exclude_unset=True)
         if data.get("board_id") and data["board_id"] != t.board_id:
             target = self._board(data["board_id"])
@@ -168,6 +197,11 @@ class RecurringService:
         t = self._get(template_id)
         board = self._board(t.board_id)
         self._require_viewable(member, board)
+        if not self._sees_all(member, board):
+            raise ForbiddenError(
+                "Only the board owner can change recurring tasks here.",
+                code="recurring_restricted",
+            )
         t.active = active
         self.db.flush()
         return self._serialize(t)
@@ -176,6 +210,11 @@ class RecurringService:
         t = self._get(template_id)
         board = self._board(t.board_id)
         self._require_viewable(member, board)
+        if not self._sees_all(member, board):
+            raise ForbiddenError(
+                "Only the board owner can change recurring tasks here.",
+                code="recurring_restricted",
+            )
         # Hard delete: existing instances keep their history (template_id -> NULL
         # via FK), future instances stop (PRD F9).
         self.db.execute(sa_delete(TaskTemplate).where(TaskTemplate.id == template_id))

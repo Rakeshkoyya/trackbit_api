@@ -105,7 +105,10 @@ def board_report(
 ) -> BoardReportResponse:
     board = db.get(Board, board_id)
     # Visible to whoever can see the board; don't leak existence of private ones.
-    if board is None or not board_report_scope(db, board=board, user_id=member.user_id):
+    # On a privacy board, only the owner/admins — regular members get no report.
+    if board is None or not board_report_scope(
+        db, board=board, user_id=member.user_id, is_admin=member.is_admin
+    ):
         raise NotFoundError("Board")
     return ReportService(db).board_report(board, member.org.timezone, range)
 
